@@ -57,7 +57,51 @@ pub enum Commands {
         #[arg(short, long)]
         name: String,
     },
-    /// Calibrate a model for quantization
+    /// Quantize a model using TurboQuant algorithm (data-oblivious, no calibration needed)
+    Quantize {
+        /// Path to the model (GGUF/Safetensors)
+        #[arg(short, long, value_parser = validate_path_exists)]
+        model: PathBuf,
+
+        /// Quantization bits per channel (2.5-4.0 recommended)
+        #[arg(short, long, default_value_t = 3.5, value_parser = validate_bits_range)]
+        bits: f32,
+
+        /// Output path for the quantized model
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate text using a quantized model (inference with quantized KV cache)
+    Generate {
+        /// Path to the model (GGUF/Safetensors)
+        #[arg(short, long, value_parser = validate_path_exists)]
+        model: PathBuf,
+
+        /// Input prompt
+        #[arg(short, long, default_value = "")]
+        prompt: String,
+
+        /// Maximum tokens to generate
+        #[arg(short = 'n', long, default_value_t = 128)]
+        max_tokens: usize,
+
+        /// Bits per channel for KV cache (3.5 = quality-neutral)
+        #[arg(short, long, default_value_t = 3.5, value_parser = validate_bits_range)]
+        bits: f32,
+
+        /// Context length
+        #[arg(short, long, default_value_t = 4096)]
+        context: usize,
+
+        /// Temperature for sampling
+        #[arg(long, default_value_t = 0.8)]
+        temperature: f32,
+
+        /// Top-p (nucleus) sampling threshold
+        #[arg(long, default_value_t = 0.95)]
+        top_p: f32,
+    },
+    /// Calibrate a model for quantization (legacy: TurboQuant is data-oblivious)
     Calibrate {
         /// Path to the model (GGUF/Safetensors)
         #[arg(short, long, value_parser = validate_path_exists)]
@@ -67,7 +111,7 @@ pub enum Commands {
         #[arg(short, long, default_value_t = 3.5, value_parser = validate_bits_range)]
         target: f32,
     },
-    /// Package a calibrated model
+    /// Package a calibrated model (legacy)
     Package {
         /// Path to the model
         #[arg(short, long, value_parser = validate_path_exists)]

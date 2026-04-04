@@ -37,6 +37,7 @@ half = { version = "2.4", features = ["rand_distr"] }
 byteorder = "1.5"
 num_cpus = "1.16"
 sysinfo = "0.30"
+rand = "0.9"
 
 [dev-dependencies]
 criterion = "0.5"
