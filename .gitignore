@@ -1,0 +1,22 @@
+# Rust
+target/
+Cargo.lock
+
+# Logs
+logs/
+*.log
+
+# Models & Data (GGUF, Safetensors, Manifests)
+*.gguf
+*.safetensors
+*.bin
+output/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+.trae/
