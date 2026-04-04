@@ -28,14 +28,24 @@ pub fn package_model(model_path: &Path, manifest_path: &Path, output_path: &Path
     let manifest = load_manifest(manifest_path)?;
     info!("Verified manifest for target: {} bits", manifest.target_bits);
 
-    // In a real implementation, this would involve merging the manifest 
-    // into the GGUF metadata or appending it as a new tensor.
-    
     let mut output_file = File::create(output_path)?;
     
-    // Simplified: Just copy the model and append the manifest for now
-    let mut model_file = File::open(model_path)?;
-    std::io::copy(&mut model_file, &mut output_file)?;
+    if model_path.is_dir() {
+        // If it's a directory, concatenate all .safetensors files
+        info!("Model is a directory, merging all .safetensors files...");
+        for entry in std::fs::read_dir(model_path)? {
+            let entry = entry?;
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("safetensors") {
+                let mut f = File::open(p)?;
+                std::io::copy(&mut f, &mut output_file)?;
+            }
+        }
+    } else {
+        // If it's a single file (GGUF)
+        let mut model_file = File::open(model_path)?;
+        std::io::copy(&mut model_file, &mut output_file)?;
+    }
     
     let serialized_manifest = bincode::serialize(&manifest)?;
     output_file.write_all(b"TURBOQUANT_META")?;

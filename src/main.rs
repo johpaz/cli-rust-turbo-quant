@@ -65,7 +65,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Package { model, manifest } => {
-            let output_path = args.output.join("model_turboquant.gguf");
+            let file_stem = model.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+            let output_name = format!("johpaz_{}_turboquant.gguf", file_stem);
+            let output_path = args.output.join(output_name);
+            
             if !args.dry_run {
                 serialization::package_model(&model, &manifest, &output_path)?;
             }
