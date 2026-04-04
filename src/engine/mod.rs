@@ -142,7 +142,7 @@ impl CalibrationEngine {
                 for (name, info) in &content.tensor_infos {
                     let qtensor = content.tensor(&mut file, name, &self.device)?;
                     // Convert QTensor to regular Tensor for stats calculation
-                    let tensor = qtensor.dequantize()?;
+                    let tensor = qtensor.dequantize(&self.device)?;
                     tensors.push((name.clone(), tensor));
                 }
             }

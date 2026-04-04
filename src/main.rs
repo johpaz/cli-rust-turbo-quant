@@ -134,7 +134,7 @@ fn main() -> anyhow::Result<()> {
                 &prompt_tokens,
                 max_tokens,
                 &mut sampler,
-                tokenizer.eos_token_id,
+                Some(tokenizer.eos_token_id),
             )?;
 
             // Decode and print output

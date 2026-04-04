@@ -16,15 +16,12 @@ impl GemmaTokenizer {
         let tokenizer = Tokenizer::from_file(path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        let eos_token_id = tokenizer.get_vocab_size() as u32 - 1; // default fallback
+        let eos_token_id = tokenizer.get_vocab_size(true) as u32 - 1; // default fallback
         let bos_token_id = 2u32; // Gemma default
 
-        // Try to extract from tokenizer config
-        if let Some(eos) = tokenizer.get_added_vocab_decoder() {
-            // Try common EOS token IDs
-            if let Some(id) = tokenizer.token_to_id("<eos>") {
-                let _ = id;
-            }
+        // Try to extract EOS from tokenizer
+        if let Some(id) = tokenizer.token_to_id("</s>") {
+            // Common EOS token for many models
         }
 
         Ok(Self {
@@ -43,8 +40,7 @@ impl GemmaTokenizer {
 
     /// Decode token IDs back to text.
     pub fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> anyhow::Result<String> {
-        let ids: Vec<u64> = token_ids.iter().map(|&x| x as u64).collect();
-        self.tokenizer.decode(&ids, skip_special_tokens)
+        self.tokenizer.decode(token_ids, skip_special_tokens)
             .map_err(|e| anyhow::anyhow!("Decoding failed: {}", e))
     }
 

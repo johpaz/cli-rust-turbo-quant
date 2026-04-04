@@ -15,9 +15,11 @@ pub mod sampler;
 pub use gguf_loader::GgufModelLoader;
 pub use gemma_model::GemmaGGUF;
 pub use sampler::LogitsSampler;
+pub use tokenizer_wrapper::{GemmaTokenizer, create_gemma_tokenizer};
 
 use candle_core::Tensor;
 use candle_core::Device;
+use candle_core::IndexOp;
 use tracing::{info, warn};
 
 /// Full generation state.
