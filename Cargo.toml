@@ -38,6 +38,7 @@ byteorder = "1.5"
 num_cpus = "1.16"
 sysinfo = "0.30"
 rand = "0.9"
+tokenizers = "0.21"
 
 [dev-dependencies]
 criterion = "0.5"

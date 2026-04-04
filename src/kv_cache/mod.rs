@@ -159,12 +159,37 @@ mod tests {
             1024, // max_seq_len
         );
 
-        // Create dummy K/V
+        // Create test K/V tensors with realistic values
+        // Simulating attention key/value patterns
         let keys: Vec<_> = (0..2)
-            .map(|l| (0..4).map(|h| vec![h as f32 * 0.1; 32]).collect())
+            .map(|l| {
+                (0..4)
+                    .map(|h| {
+                        // Create varied patterns like real attention keys
+                        (0..32)
+                            .map(|i| {
+                                let base = (l * 4 + h) as f32 * 0.05;
+                                base + (i as f32 * 0.01)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
             .collect();
         let values: Vec<_> = (0..2)
-            .map(|l| (0..4).map(|h| vec![h as f32 * 0.2; 32]).collect())
+            .map(|l| {
+                (0..4)
+                    .map(|h| {
+                        // Create varied patterns like real attention values
+                        (0..32)
+                            .map(|i| {
+                                let base = (l * 4 + h) as f32 * 0.08;
+                                base - (i as f32 * 0.005)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
             .collect();
 
         session.append_token(&keys, &values, Some(0));

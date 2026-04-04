@@ -9,6 +9,8 @@ mod benchmarking;
 mod doctor;
 mod math;
 mod kv_cache;
+mod generation;
+mod inspect;
 
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -43,21 +45,8 @@ fn main() -> anyhow::Result<()> {
             info!("Quantizing model {:?} to {} bits/channel", model, bits);
             info!("Output: {:?}", output_path);
 
-            // Inspect model
-            let metadata = match loader::inspect_model(&model) {
-                Ok(m) => m,
-                Err(e) if args.dry_run => {
-                    warn!("Model inspection failed: {}. Using mock metadata for dry-run.", e);
-                    loader::ModelMetadata {
-                        architecture: "mock-transformer".to_string(),
-                        num_layers: 32,
-                        embedding_dim: 4096,
-                        context_window: 4096,
-                        parameters_count: 7_000_000_000,
-                    }
-                }
-                Err(e) => return Err(e),
-            };
+            // Inspect model - no fallback to mock data
+            let metadata = loader::inspect_model(&model)?;
 
             info!("Model: {} | Layers: {} | Embedding: {} | Context: {} | Params: {:.1}B",
                 metadata.architecture, metadata.num_layers, metadata.embedding_dim,
@@ -83,69 +72,88 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Generate { model, prompt, max_tokens, bits, context, temperature, top_p } => {
-            info!("Generating text with TurboQuant KV cache at {:.1} bits/channel", bits);
+            info!("🚀 Generating text with TurboQuant");
+            info!("Model: {:?}", model);
             info!("Prompt: \"{}\"", prompt);
-            info!("Max tokens: {}, Context: {}, Temp: {:.2}, Top-p: {:.2}",
-                max_tokens, context, temperature, top_p);
+            info!("Config: bits={}, max_tokens={}, context={}, temp={:.2}, top_p={:.2}",
+                bits, max_tokens, context, temperature, top_p);
 
-            // Inspect model
-            let metadata = match loader::inspect_model(&model) {
-                Ok(m) => m,
-                Err(e) if args.dry_run => {
-                    warn!("Model inspection failed: {}. Using mock metadata for dry-run.", e);
-                    loader::ModelMetadata {
-                        architecture: "mock-transformer".to_string(),
-                        num_layers: 32,
-                        embedding_dim: 4096,
-                        context_window: context,
-                        parameters_count: 7_000_000_000,
-                    }
+            // Detect model type from GGUF
+            let metadata = loader::inspect_model(&model)?;
+            info!("Model metadata: arch={} layers={} hidden={} context={}",
+                metadata.architecture, metadata.num_layers, metadata.embedding_dim, metadata.context_window);
+
+            // Determine device
+            let device = candle_core::Device::Cpu;
+            info!("Using device: CPU");
+
+            // Load the full GGUF model
+            info!("Loading model weights from GGUF...");
+            let mut gemma_model = generation::GemmaGGUF::from_gguf(
+                model.to_str().unwrap(),
+                device.clone(),
+            )?;
+
+            info!("Model loaded successfully!");
+            info!("TurboQuant KV Cache memory estimate: {:.4} GB", {
+                let kv = crate::kv_cache::TurboQuantInference::new(
+                    gemma_model.config.num_hidden_layers,
+                    gemma_model.config.num_attention_heads,
+                    gemma_model.config.head_dim,
+                    bits,
+                    context,
+                );
+                kv.total_kv_cache_memory_gb()
+            });
+
+            // Load tokenizer
+            let tokenizer = match generation::create_gemma_tokenizer(model.to_str().unwrap()) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Tokenizer not found: {}", e);
+                    info!("Attempting to use GGUF metadata for basic token mapping...");
+                    anyhow::bail!(
+                        "A tokenizer.json file is required for text generation.\n\
+                         Download it from HuggingFace and place it next to the GGUF file.\n\
+                         For Gemma 4, try: https://huggingface.co/google/gemma-4-E4B-it"
+                    );
                 }
-                Err(e) => return Err(e),
             };
 
-            let num_heads = metadata.embedding_dim / 128;
-            let head_dim = 128;
-            let session = kv_cache::TurboQuantInference::new(
-                metadata.num_layers,
-                num_heads,
-                head_dim,
-                bits,
-                context,
-            );
+            // Encode prompt
+            let prompt_tokens = tokenizer.encode(&prompt, true)?;
+            info!("Prompt tokenized: {} tokens", prompt_tokens.len());
 
-            info!("KV Cache memory estimate: {:.4} GB (vs {:.4} GB for FP16)",
-                session.total_kv_cache_memory_gb(),
-                session.total_kv_cache_memory_gb() * 16.0 / bits);
+            // Create sampler
+            let temp = if temperature > 0.0 { Some(temperature as f64) } else { None };
+            let top_p = if top_p > 0.0 && top_p < 1.0 { Some(top_p as f64) } else { None };
+            let mut sampler = generation::LogitsSampler::new(42, temp, top_p);
 
-            // Note: Full inference requires model loading + forward pass integration with Candle
-            // This is a scaffold for the complete pipeline
-            if !prompt.is_empty() {
-                info!("Tokenizing prompt...");
-                // Tokenization and generation loop would go here
-                // The math module handles the quantized attention internally
-                info!("Generation scaffolding complete. Full Candle integration needed for token generation.");
-            }
+            // Generate
+            let generated_tokens = gemma_model.generate_text(
+                &prompt_tokens,
+                max_tokens,
+                &mut sampler,
+                tokenizer.eos_token_id,
+            )?;
+
+            // Decode and print output
+            let generated_text = tokenizer.decode(&generated_tokens, true)?;
+
+            println!("\n{}", "═".repeat(60));
+            println!("📝 GENERATED TEXT");
+            println!("{}", "═".repeat(60));
+            println!("{}", prompt);
+            print!("{}", generated_text);
+            println!("\n{}", "═".repeat(60));
+            println!("📊 Stats: {} tokens generated", generated_tokens.len());
         }
         Commands::Calibrate { model, target } => {
             warn!("Calibrate command is legacy. TurboQuant is data-oblivious and does not require calibration.");
             warn!("Use 'quantize' command instead with --bits flag.");
 
-            // Still run for backward compatibility
-            let metadata = match loader::inspect_model(&model) {
-                Ok(m) => m,
-                Err(e) if args.dry_run => {
-                    warn!("Model inspection failed: {}. Using mock metadata for dry-run.", e);
-                    loader::ModelMetadata {
-                        architecture: "mock-llama".to_string(),
-                        num_layers: 32,
-                        embedding_dim: 4096,
-                        context_window: 2048,
-                        parameters_count: 7_000_000_000,
-                    }
-                }
-                Err(e) => return Err(e),
-            };
+            // Run calibration with real model inspection
+            let metadata = loader::inspect_model(&model)?;
             info!("Model Info: Arch: {}, Layers: {}, Embedding: {}, Context: {}, Params: {}",
                 metadata.architecture, metadata.num_layers, metadata.embedding_dim, metadata.context_window, metadata.parameters_count);
 

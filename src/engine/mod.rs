@@ -1,7 +1,9 @@
 use candle_core::{Tensor, Device};
+use candle_core::quantized::gguf_file;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LayerStats {
@@ -22,7 +24,6 @@ pub struct CalibrationManifest {
 }
 
 pub struct CalibrationEngine {
-    #[allow(dead_code)]
     pub device: Device,
 }
 
@@ -33,34 +34,33 @@ impl CalibrationEngine {
         }
     }
 
-    pub fn run_calibration(&self, _model_path: &std::path::Path, target_bits: f32, num_layers: usize) -> anyhow::Result<CalibrationManifest> {
+    pub fn run_calibration(&self, model_path: &Path, target_bits: f32, _num_layers: usize) -> anyhow::Result<CalibrationManifest> {
         info!("Starting calibration for target: {} bits", target_bits);
+        info!("Loading model from: {:?}", model_path);
+
+        // Calculate model hash
+        let model_hash = self.calculate_model_hash(model_path)?;
+
+        // Load tensors from model
+        let tensors = self.load_model_tensors(model_path)?;
         
-        let pb = ProgressBar::new(num_layers as u64);
+        let pb = ProgressBar::new(tensors.len() as u64);
         pb.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} layers ({eta})")?
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} tensors ({eta})")?
             .progress_chars("#>-"));
 
-        // Mocking the calibration process
         let mut stats = Vec::new();
-        for i in 0..num_layers {
-            // Simulate work
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        for (i, (name, tensor)) in tensors.iter().enumerate() {
+            info!("Processing tensor: {} ({}/{})", name, i + 1, tensors.len());
             
-            stats.push(LayerStats {
-                layer_id: i,
-                mean: 0.01 * i as f32,
-                variance: 0.5,
-                min: -1.0,
-                max: 1.0,
-                scale_factor: 1.2,
-            });
+            let layer_stats = self.capture_tensor_stats(tensor, i)?;
+            stats.push(layer_stats);
             pb.inc(1);
         }
         pb.finish_with_message("Calibration complete!");
 
         let manifest = CalibrationManifest {
-            model_hash: "sha256:example_hash".to_string(),
+            model_hash,
             target_bits,
             stats,
             timestamp: std::time::SystemTime::now()
@@ -68,26 +68,121 @@ impl CalibrationEngine {
                 .as_secs(),
         };
 
-        info!("Calibration finished. Captured stats for {} layers.", manifest.stats.len());
+        info!("Calibration finished. Captured stats for {} tensors.", manifest.stats.len());
         Ok(manifest)
     }
 
-    #[allow(dead_code)]
-    pub fn capture_tensor_stats(&self, tensor: &Tensor) -> anyhow::Result<LayerStats> {
-        let mean = tensor.mean_all()?.to_scalar::<f32>()?;
-        let min = tensor.flatten_all()?.min(0)?.to_scalar::<f32>()?;
-        let max = tensor.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+    fn calculate_model_hash(&self, model_path: &Path) -> anyhow::Result<String> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::io::Read;
+
+        let mut hasher = DefaultHasher::new();
         
-        // Simplified variance calculation
-        let var = tensor.sqr()?.mean_all()?.to_scalar::<f32>()? - mean.powi(2);
+        if model_path.is_dir() {
+            // Hash all safetensors files
+            let mut entries: Vec<_> = std::fs::read_dir(model_path)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("safetensors"))
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            
+            for entry in entries {
+                entry.file_name().hash(&mut hasher);
+                let mut file = std::fs::File::open(entry.path())?;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let bytes_read = file.read(&mut buffer)?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    buffer[..bytes_read].hash(&mut hasher);
+                }
+            }
+        } else {
+            // Hash GGUF file
+            model_path.file_name().hash(&mut hasher);
+            let mut file = std::fs::File::open(model_path)?;
+            let mut buffer = [0u8; 8192];
+            loop {
+                let bytes_read = file.read(&mut buffer)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                buffer[..bytes_read].hash(&mut hasher);
+            }
+        }
+
+        Ok(format!("sha256:{:016x}", hasher.finish()))
+    }
+
+    fn load_model_tensors(&self, model_path: &Path) -> anyhow::Result<Vec<(String, Tensor)>> {
+        let mut tensors = Vec::new();
+
+        if model_path.is_dir() {
+            // Load from safetensors directory
+            for entry in std::fs::read_dir(model_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("safetensors") {
+                    let file_data = std::fs::read(&path)?;
+                    let loaded = candle_core::safetensors::load_buffer(&file_data, &self.device)?;
+                    for (name, tensor) in loaded {
+                        tensors.push((name, tensor));
+                    }
+                }
+            }
+        } else {
+            // Load from GGUF file
+            let extension = model_path.extension().and_then(|s| s.to_str()).unwrap_or_default();
+            if extension == "gguf" {
+                let mut file = std::fs::File::open(model_path)?;
+                let content = gguf_file::Content::read(&mut file)?;
+                
+                for (name, info) in &content.tensor_infos {
+                    let qtensor = content.tensor(&mut file, name, &self.device)?;
+                    // Convert QTensor to regular Tensor for stats calculation
+                    let tensor = qtensor.dequantize()?;
+                    tensors.push((name.clone(), tensor));
+                }
+            }
+        }
+
+        info!("Loaded {} tensors from model", tensors.len());
+        Ok(tensors)
+    }
+
+    pub fn capture_tensor_stats(&self, tensor: &Tensor, layer_id: usize) -> anyhow::Result<LayerStats> {
+        // Calculate mean
+        let mean = tensor.mean_all()?.to_scalar::<f32>()?;
+        
+        // Calculate min and max
+        let flattened = tensor.flatten_all()?;
+        let min = flattened.min(0)?.to_scalar::<f32>()?;
+        let max = flattened.max(0)?.to_scalar::<f32>()?;
+
+        // Calculate variance: Var(X) = E[X²] - (E[X])²
+        let sqr_tensor = tensor.sqr()?;
+        let mean_of_squares = sqr_tensor.mean_all()?.to_scalar::<f32>()?;
+        let variance = mean_of_squares - mean.powi(2);
+
+        // Calculate scale factor based on range and target bits
+        // For quantization: scale = (max - min) / (2^bits - 1)
+        let num_levels = (2.0_f32.powf(32.0 * self.get_target_bits_ratio())) - 1.0;
+        let scale_factor = (max - min) / num_levels.max(1e-6);
 
         Ok(LayerStats {
-            layer_id: 0, // Should be passed
+            layer_id,
             mean,
-            variance: var,
+            variance: variance.max(0.0), // Ensure non-negative
             min,
             max,
-            scale_factor: (max - min) / 255.0, // Example scale
+            scale_factor,
         })
+    }
+
+    fn get_target_bits_ratio(&self) -> f32 {
+        // Default to 4-bit quantization ratio if not specified
+        4.0 / 16.0 // 4-bit is 1/4 of 16-bit
     }
 }

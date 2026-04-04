@@ -109,24 +109,121 @@ fn load_gguf_metadata(path: &Path) -> anyhow::Result<ModelMetadata> {
     })
 }
 
-#[allow(dead_code)]
 fn load_safetensors_metadata(path: &Path) -> anyhow::Result<ModelMetadata> {
     info!("Inspecting Safetensors model: {:?}", path);
-    // Candle can read safetensors too
+    
+    // Load the safetensors file
     let file = std::fs::read(path)?;
     let tensors = candle_core::safetensors::load_buffer(&file, &Device::Cpu)?;
-    
-    // For safetensors, metadata is often in a separate config.json, 
-    // but some info can be inferred from tensor shapes.
-    // This is a simplified version.
-    
+
+    // Calculate total parameters
+    let parameters_count = tensors.values().map(|t| t.elem_count() as u64).sum();
+
+    // Try to infer architecture from tensor names and shapes
+    let mut num_layers = 0;
+    let mut embedding_dim = 0;
+    let mut context_window = 0;
+    let mut architecture = "transformer".to_string();
+
+    // Look for common patterns in tensor names
+    for name in tensors.keys() {
+        // Detect architecture from naming patterns
+        if name.contains("llama") || name.contains("Llama") {
+            architecture = "llama".to_string();
+        } else if name.contains("mistral") || name.contains("Mistral") {
+            architecture = "mistral".to_string();
+        } else if name.contains("gemma") || name.contains("Gemma") {
+            architecture = "gemma".to_string();
+        } else if name.contains("phi") || name.contains("Phi") {
+            architecture = "phi2".to_string();
+        }
+
+        // Count layers by finding pattern like "model.layers.X"
+        if let Some(layer_part) = extract_layer_number(name) {
+            num_layers = num_layers.max(layer_part + 1);
+        }
+
+        // Infer embedding dimension from embedding or attention tensors
+        if name.contains("embed_tokens") || name.contains("input_layernorm") {
+            if let Some(tensor) = tensors.get(name) {
+                let shape = tensor.shape();
+                if shape.dims().len() >= 2 {
+                    embedding_dim = shape.dims()[1];
+                } else if shape.dims().len() == 1 {
+                    embedding_dim = shape.dims()[0];
+                }
+            }
+        }
+
+        // Try to detect context window from position embeddings
+        if name.contains("position_embeddings") || name.contains("rotary_emb") {
+            if let Some(tensor) = tensors.get(name) {
+                let shape = tensor.shape();
+                if shape.dims().len() >= 2 {
+                    context_window = context_window.max(shape.dims()[0]);
+                }
+            }
+        }
+    }
+
+    // Try to load config.json if it exists in parent directory
+    if let Some(parent) = path.parent() {
+        let config_path = parent.join("config.json");
+        if config_path.exists() {
+            let file = std::fs::File::open(&config_path)?;
+            let json: serde_json::Value = serde_json::from_reader(file)?;
+
+            if architecture == "transformer" {
+                architecture = json["model_type"].as_str().unwrap_or("transformer").to_string();
+            }
+            
+            if num_layers == 0 {
+                num_layers = json["num_hidden_layers"]
+                    .as_u64()
+                    .or_else(|| json["num_layers"].as_u64())
+                    .unwrap_or(0) as usize;
+            }
+            
+            if embedding_dim == 0 {
+                embedding_dim = json["hidden_size"]
+                    .as_u64()
+                    .unwrap_or(0) as usize;
+            }
+            
+            if context_window == 0 {
+                context_window = json["max_position_embeddings"]
+                    .as_u64()
+                    .or_else(|| json["max_seq_len"].as_u64())
+                    .unwrap_or(0) as usize;
+            }
+        }
+    }
+
+    validate_architecture(&architecture)?;
+
+    info!("Safetensors model metadata: arch={}, layers={}, embedding={}, context={}, params={}",
+        architecture, num_layers, embedding_dim, context_window, parameters_count);
+
     Ok(ModelMetadata {
-        architecture: "transformer".to_string(),
-        num_layers: 0, // Needs config.json
-        embedding_dim: 0,
-        context_window: 0,
-        parameters_count: tensors.values().map(|t| t.elem_count() as u64).sum(),
+        architecture,
+        num_layers,
+        embedding_dim,
+        context_window,
+        parameters_count,
     })
+}
+
+fn extract_layer_number(name: &str) -> Option<usize> {
+    // Pattern: "model.layers.X." or "layers.X."
+    let parts: Vec<&str> = name.split('.').collect();
+    for i in 0..parts.len().saturating_sub(1) {
+        if (parts[i] == "layers" || parts[i] == "blocks") && i + 1 < parts.len() {
+            if let Ok(num) = parts[i + 1].parse::<usize>() {
+                return Some(num);
+            }
+        }
+    }
+    None
 }
 
 fn validate_architecture(arch: &str) -> anyhow::Result<()> {
