@@ -11,10 +11,11 @@ mod math;
 mod kv_cache;
 mod generation;
 mod inspect;
+mod server;
 
 use clap::Parser;
 use cli::{Cli, Commands};
-use tracing::{info, debug, warn};
+use tracing::{info, debug, warn, error};
 use config::AppConfig;
 
 fn main() -> anyhow::Result<()> {
@@ -187,6 +188,28 @@ fn main() -> anyhow::Result<()> {
 
             // Also show bits comparison
             info!("\n{}", benchmarking::benchmark_bits_comparison(context));
+        }
+        Commands::Inspect { model } => {
+            info!("Inspecting model: {:?}", model);
+            inspect::inspect_gguf(model.to_str().unwrap())?;
+        }
+        Commands::Serve { model, host, port, bits, context } => {
+            info!("🚀 Starting TurboQuant API Server");
+            info!("Model: {:?}", model);
+            info!("Address: {}:{}", host, port);
+            info!("KV Cache bits: {}, Context: {}", bits, context);
+
+            let model_path = model.to_str().unwrap().to_string();
+            let host = host.clone();
+
+            // Run the async server
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                if let Err(e) = server::start_server(&model_path, &host, port).await {
+                    error!("Server error: {}", e);
+                    std::process::exit(1);
+                }
+            });
         }
         Commands::Doctor => {
             doctor::run_doctor()?;

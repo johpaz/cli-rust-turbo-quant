@@ -120,14 +120,14 @@ impl Attention {
         let o_proj = QMatMul::from_qtensor(loader.get_qtensor(&format!("{}.attn_output.weight", prefix), device)?)?;
 
         let q_norm = if loader.content.gguf.tensor_infos.contains_key(&format!("{}.attn_q_norm.weight", prefix)) {
-            let w = loader.get_tensor(&format!("{}.attn_q_norm.weight", prefix), device)?;
+            let w = loader.get_tensor(&format!("{}.attn_q_norm.weight", prefix), device)?.to_dtype(DType::F32)?;
             Some(RmsNorm::new(w, cfg.rms_norm_eps))
         } else {
             None
         };
 
         let k_norm = if loader.content.gguf.tensor_infos.contains_key(&format!("{}.attn_k_norm.weight", prefix)) {
-            let w = loader.get_tensor(&format!("{}.attn_k_norm.weight", prefix), device)?;
+            let w = loader.get_tensor(&format!("{}.attn_k_norm.weight", prefix), device)?.to_dtype(DType::F32)?;
             Some(RmsNorm::new(w, cfg.rms_norm_eps))
         } else {
             None
@@ -345,19 +345,19 @@ impl LayerWeights {
     pub fn from_loader(loader: &mut GgufModelLoader, layer: usize, cfg: &ModelConfig, device: &Device) -> Result<Self> {
         let prefix = format!("blk.{}", layer);
 
-        let attn_norm_weight = loader.get_tensor(&format!("{}.attn_norm.weight", prefix), device)?;
+        let attn_norm_weight = loader.get_tensor(&format!("{}.attn_norm.weight", prefix), device)?.to_dtype(DType::F32)?;
         let attn_norm = RmsNorm::new(attn_norm_weight, cfg.rms_norm_eps);
 
         let attention = Attention::from_loader(loader, layer, cfg, device)?;
 
         let post_attn_norm = if loader.content.gguf.tensor_infos.contains_key(&format!("{}.post_attention_norm.weight", prefix)) {
-            let w = loader.get_tensor(&format!("{}.post_attention_norm.weight", prefix), device)?;
+            let w = loader.get_tensor(&format!("{}.post_attention_norm.weight", prefix), device)?.to_dtype(DType::F32)?;
             Some(RmsNorm::new(w, cfg.rms_norm_eps))
         } else {
             None
         };
 
-        let ffn_norm_weight = loader.get_tensor(&format!("{}.ffn_norm.weight", prefix), device)?;
+        let ffn_norm_weight = loader.get_tensor(&format!("{}.ffn_norm.weight", prefix), device)?.to_dtype(DType::F32)?;
         let ffn_norm = RmsNorm::new(ffn_norm_weight, cfg.rms_norm_eps);
 
         let mlp = if let (Some(num_experts), Some(num_used)) = (cfg.num_local_experts, cfg.num_experts_per_tok) {
@@ -368,7 +368,7 @@ impl LayerWeights {
         };
 
         let post_ffn_norm = if loader.content.gguf.tensor_infos.contains_key(&format!("{}.post_ffw_norm.weight", prefix)) {
-            let w = loader.get_tensor(&format!("{}.post_ffw_norm.weight", prefix), device)?;
+            let w = loader.get_tensor(&format!("{}.post_ffw_norm.weight", prefix), device)?.to_dtype(DType::F32)?;
             Some(RmsNorm::new(w, cfg.rms_norm_eps))
         } else {
             None
@@ -430,16 +430,44 @@ impl GemmaGGUF {
         let cfg = loader.content.config.clone();
 
         // Token embeddings
-        let tok_emb_weight = loader.get_tensor("token_embd.weight", &device)?;
-        let tok_embeddings = Embedding::new(tok_emb_weight, cfg.hidden_size);
+        info!("Loading token embeddings...");
+        let tok_emb_weight = loader.get_tensor("token_embd.weight", &device)?.to_dtype(DType::F32)?;
+        info!("Token embeddings loaded: shape={:?}, dtype={:?}", tok_emb_weight.shape(), tok_emb_weight.dtype());
+        let tok_embeddings = Embedding::new(tok_emb_weight.clone(), cfg.hidden_size);
 
-        // Output projection
-        let output_qtensor = loader.get_qtensor("output.weight", &device)?;
-        let output = QMatMul::from_qtensor(output_qtensor)?;
+        // Output projection - try different naming conventions
+        // For tied weights, load the raw QTensor from GGUF (avoids dequantize/quantize cycle)
+        let output = if loader.content.gguf.tensor_infos.contains_key("output.weight") {
+            info!("Loading output projection from 'output.weight'...");
+            let output_qtensor = loader.get_qtensor("output.weight", &device)?;
+            QMatMul::from_qtensor(output_qtensor)?
+        } else if loader.content.gguf.tensor_infos.contains_key("output_proj.weight") {
+            info!("Loading output projection from 'output_proj.weight'...");
+            let output_qtensor = loader.get_qtensor("output_proj.weight", &device)?;
+            QMatMul::from_qtensor(output_qtensor)?
+        } else if loader.content.gguf.tensor_infos.contains_key("token_embd.weight") {
+            // Use the original quantized GGUF tensor for tied weights (Q6K)
+            info!("Using original GGUF quantized token_embd.weight as tied output projection...");
+            let output_qtensor = loader.get_qtensor("token_embd.weight", &device)?;
+            QMatMul::from_qtensor(output_qtensor)?
+        } else {
+            anyhow::bail!("No output projection found and no tied weights available");
+        };
 
-        // Final norm
-        let norm_weight = loader.get_tensor("output_norm.weight", &device)?;
-        let norm = RmsNorm::new(norm_weight, cfg.rms_norm_eps);
+        // Final norm - try different naming conventions
+        let norm = if loader.content.gguf.tensor_infos.contains_key("output_norm.weight") {
+            info!("Loading norm from 'output_norm.weight'...");
+            let norm_weight = loader.get_tensor("output_norm.weight", &device)?.to_dtype(DType::F32)?;
+            RmsNorm::new(norm_weight, cfg.rms_norm_eps)
+        } else if loader.content.gguf.tensor_infos.contains_key("norm.weight") {
+            info!("Loading norm from 'norm.weight'...");
+            let norm_weight = loader.get_tensor("norm.weight", &device)?.to_dtype(DType::F32)?;
+            RmsNorm::new(norm_weight, cfg.rms_norm_eps)
+        } else {
+            // Create default norm with epsilon
+            info!("Creating default RMS norm with eps={}", cfg.rms_norm_eps);
+            RmsNorm::new(candle_core::Tensor::ones((cfg.hidden_size,), candle_core::DType::F32, &device)?.to_dtype(candle_core::DType::F32)?, cfg.rms_norm_eps)
+        };
 
         // Layers
         info!("Loading {} transformer layers...", cfg.num_hidden_layers);

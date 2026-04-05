@@ -137,8 +137,36 @@ pub enum Commands {
         #[arg(short, long, default_value_t = 4096)]
         context: usize,
     },
+    /// Inspect model metadata and tensors
+    Inspect {
+        /// Path to the model
+        #[arg(short, long, value_parser = validate_path_exists)]
+        model: PathBuf,
+    },
     /// Analyze host environment and suggest optimizations
     Doctor,
+    /// Start HTTP API server for text generation
+    Serve {
+        /// Path to the model (GGUF)
+        #[arg(short, long, value_parser = validate_path_exists)]
+        model: PathBuf,
+
+        /// Host address to bind to
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+
+        /// Bits per channel for KV cache
+        #[arg(short, long, default_value_t = 3.5, value_parser = validate_bits_range)]
+        bits: f32,
+
+        /// Context length
+        #[arg(short, long, default_value_t = 4096)]
+        context: usize,
+    },
 }
 
 fn validate_path_exists(s: &str) -> Result<PathBuf, String> {
